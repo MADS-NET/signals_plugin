@@ -36,7 +36,9 @@ else()
 endif()
 
 # PROJECT SETTINGS #############################################################
-set(CMAKE_CXX_STANDARD 17)
+# C++20: SigGen (and Expressionist under it) requires it, and asks for it
+# through its INTERFACE compile features anyway
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(SRC_DIR ${CMAKE_CURRENT_LIST_DIR}/src)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
