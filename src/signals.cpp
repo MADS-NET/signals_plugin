@@ -46,7 +46,7 @@ namespace {
 /// that a signal may refer to it as an algebraic expression ("$f0 * 3").
 const set<string> ReservedKeys = {
     // consumed by the plugin
-    "signals", "sample_rate", "seed", "nest", "track_period",
+    "signals", "sample_rate", "seed", "nest", "track_period", "epoch",
     // injected by the host
     "agent_id", "agent_name", "prefix",
     // consumed by the agent
@@ -111,26 +111,40 @@ public:
     }
 
     try {
-      // One sample per call means the sampling frequency is the reciprocal of
-      // the loop period; keep it aligned with the period actually observed.
-      track_call_period();
-
-      out["t"] = _elapsed;
-      out["n"] = _index;
-      out["sample_rate"] = _sample_rate;
-
-      // The signal values, as a name -> value map. Written after the fields
-      // above so that a signal named "t" or "n" wins over them.
+      // The signal values, as a name -> value map. Written into `out` after
+      // "t" and "n" below, so that a signal named "t" or "n" wins over them.
       json values = json::object();
-      for (auto &generator : _generators)
-        values[generator.name] = generator.signal->next();
+
+      if (_synchro) {
+        // Address the sample belonging to *now* rather than counting calls:
+        // every plugin sharing the epoch, sample rate and seed lands on the
+        // same index at the same wall-clock instant, however far apart each
+        // of them started.
+        const double now = SigGen::unix_now();
+        const uint64_t index = _generators.front().signal->index_at(now);
+        out["t"] = _generators.front().signal->time_at(index);
+        out["n"] = index;
+        out["sample_rate"] = _sample_rate;
+        for (auto &generator : _generators)
+          values[generator.name] = generator.signal->at(index);
+      } else {
+        // One sample per call means the sampling frequency is the reciprocal
+        // of the loop period; keep it aligned with the period actually
+        // observed.
+        track_call_period();
+        out["t"] = _elapsed;
+        out["n"] = _index;
+        out["sample_rate"] = _sample_rate;
+        for (auto &generator : _generators)
+          values[generator.name] = generator.signal->next();
+        _elapsed += 1.0 / _sample_rate;
+        _index += 1;
+      }
+
       if (_nest.empty())
         out.update(values);
       else
         out[_nest] = values;
-
-      _elapsed += 1.0 / _sample_rate;
-      _index += 1;
     } catch (const exception &e) {
       _error = string("signal generation failed: ") + e.what();
       return return_type::error;
@@ -153,6 +167,7 @@ public:
     _params["seed"] = nullptr;           // base seed, default: non-reproducible
     _params["nest"] = "";                // key holding the map, "" = flat
     _params["track_period"] = true;      // follow the measured call period
+    _params["epoch"] = 0.0;              // shared Unix-s epoch; 0 = no synchro
     // more here...
 
     // then merge the defaults with the actually provided parameters
@@ -169,7 +184,17 @@ public:
     try {
       _nest = _params["nest"].get<string>();
       _track_period = _params["track_period"].get<bool>();
+      _epoch = resolve_epoch();
+      _synchro = _epoch != 0.0;
       _sample_rate = resolve_sample_rate();
+      if (_synchro && _track_period) {
+        // A per-instance measured period would let cooperating plugins drift
+        // to different sampling rates, which breaks the very alignment synchro
+        // generation is for: the epoch, the rate and the seed must all be
+        // identical across them.
+        _track_period = false;
+        _rate_source += "; frozen for synchro generation";
+      }
       build_generators();
     } catch (const exception &e) {
       _setup_error = e.what();
@@ -196,6 +221,8 @@ public:
         {"track call period", _track_period ? "yes" : "no"},
         {"seed", _seeded ? std::to_string(_seed) : "random"},
         {"output map", _nest.empty() ? "flat" : _nest},
+        {"synchro epoch",
+         _synchro ? format_number(_epoch) + " (unix s)" : "disabled"},
     };
   };
 
@@ -205,6 +232,17 @@ private:
     string name;
     unique_ptr<SigGen::Signal> signal;
   };
+
+  /// The shared epoch for synchro generation, in seconds since the Unix
+  /// epoch. Zero (the default) means every generator is addressed the usual
+  /// way, one next() per call, with no cross-plugin alignment.
+  double resolve_epoch() {
+    const json &epoch = _params["epoch"];
+    if (!epoch.is_number())
+      throw runtime_error("'epoch' must be a number, got " +
+                          string(epoch.type_name()));
+    return epoch.get<double>();
+  }
 
   /// The sampling frequency: an explicit "sample_rate" wins, otherwise it is
   /// the reciprocal of the agent loop period.
@@ -274,6 +312,7 @@ private:
       json document = base;
       document["signal"] = item.value();
       document["sample_rate"] = _sample_rate;
+      document["epoch"] = _epoch;
       // Distinct streams: sharing one seed would make every signal's noise
       // the same sequence. A per-signal "seed" overrides the derived one.
       if (item.value().is_object() && item.value().contains("seed"))
@@ -281,7 +320,15 @@ private:
       else if (_seeded)
         document["seed"] = _seed + offset;
       try {
-        _generators.push_back({item.key(), SigGen::from_json(document)});
+        auto signal = SigGen::from_json(document);
+        // Synchro generation addresses samples by index (see get_output()),
+        // which not every generator can do; refuse to start rather than
+        // silently falling back to an unsynchronized stream.
+        if (_synchro && !signal->is_addressable())
+          throw runtime_error("type '" + signal->type() +
+                              "' does not support synchro generation (not "
+                              "addressable); set 'epoch' to 0 to drop it");
+        _generators.push_back({item.key(), std::move(signal)});
       } catch (const exception &e) {
         throw runtime_error("signal '" + item.key() + "': " + e.what());
       }
@@ -332,6 +379,8 @@ private:
   uint64_t _seed = 0;
   bool _seeded = false;
   bool _track_period = true;
+  double _epoch = 0.0;
+  bool _synchro = false;
   // call-period tracking
   chrono::steady_clock::time_point _last_call;
   double _dt = 0.0;
@@ -473,6 +522,47 @@ void test_seeding() {
   }
 }
 
+/// Two plugin instances sharing an epoch, sample rate and (implicitly, since
+/// both signals are noiseless waveforms) no randomness must agree on every
+/// sample: get_output() addresses whatever index "now" belongs to, rather
+/// than counting its own calls, so neither instance's history matters.
+void test_synchro_generation() {
+  json params = base_params();
+  params["epoch"] = 1'700'000'000.0; // an arbitrary shared reference instant
+
+  SignalsPlugin one, two;
+  one.set_params(params);
+  two.set_params(params);
+
+  json out_one, out_two;
+  for (int i = 0; i < 4; ++i) {
+    check(one.get_output(out_one) == return_type::success,
+          "synchro run succeeds on the first instance");
+    check(two.get_output(out_two) == return_type::success,
+          "synchro run succeeds on the second instance");
+    check(out_one == out_two,
+          "two independently started plugins agree on the same wall-clock sample");
+  }
+}
+
+/// A signal that cannot be addressed by index must stop synchro generation
+/// from starting at all, rather than silently falling back to next().
+void test_synchro_requires_addressable() {
+  json params = base_params();
+  params["epoch"] = 1'700'000'000.0;
+  params["signals"]["walk"] = {
+      {"type", "arima"}, {"ar", json::array({0.6})}, {"d", 1}};
+
+  SignalsPlugin plugin;
+  plugin.set_params(params);
+
+  json out;
+  check(plugin.get_output(out) == return_type::critical,
+        "a non-addressable signal refuses to start under synchro generation");
+  check(plugin.error().find("addressable") != string::npos,
+        "the error explains that the signal cannot be addressed");
+}
+
 void test_configuration_errors() {
   json out;
 
@@ -509,6 +599,8 @@ int main(int argc, char const *argv[]) {
   test_nested_output();
   test_sample_rate_from_period();
   test_seeding();
+  test_synchro_generation();
+  test_synchro_requires_addressable();
   test_configuration_errors();
 
   if (Failures > 0) {

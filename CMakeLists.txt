@@ -73,7 +73,7 @@ set(SIGGEN_BUILD_TOOL OFF CACHE INTERNAL "")
 FetchContent_Declare(
   SigGen
   GIT_REPOSITORY https://github.com/pbosetti/SigGen.git
-  GIT_TAG        main
+  GIT_TAG        0.2.0
 )
 
 FetchContent_MakeAvailable(pugg json SigGen)
