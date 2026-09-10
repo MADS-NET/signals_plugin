@@ -24,6 +24,7 @@
 #include <cmath>
 #include <exception>
 #include <memory>
+#include <numbers>
 #include <set>
 #include <sstream>
 #include <string>
@@ -394,7 +395,7 @@ json base_params() {
 
 /// The waveform the plugin is expected to reproduce, sample by sample.
 double expected_sine(uint64_t n) {
-  return 2.0 * sin(2.0 * M_PI * fmod(n * 1.0 / 8.0, 1.0)) + 1.0;
+  return 2.0 * sin(2.0 * std::numbers::pi * fmod(n * 1.0 / 8.0, 1.0)) + 1.0;
 }
 
 double expected_ramp(uint64_t n) {
