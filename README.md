@@ -1,4 +1,4 @@
-# siggen plugin for MADS
+# signals plugin for MADS
 
 This is a Source plugin for [MADS](https://github.com/MADS-NET/MADS).
 
