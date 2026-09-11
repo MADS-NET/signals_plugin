@@ -74,11 +74,28 @@ components = [
   { type = "square", frequency = "$f0 / 5", amplitude = 0.5, offset = 3.0, noiseless = true },
   { type = "white_noise", sigma = 0.02 }
 ]
+
+# an array of tables packs its signals into one JSON array, in order:
+# {"position": [x, y, z]}
+[[signals.signals.position]]
+type = "sine"
+frequency = "$f0"
+amplitude = 1.0
+
+[[signals.signals.position]]
+type = "sine"
+frequency = "$f0"
+phase = 1.5707963
+
+[[signals.signals.position]]
+type = "sawtooth"
+frequency = "$f0 / 10"
+amplitude = 0.2
 ```
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `signals` | object | *(required)* | Map of signal name to [SigGen signal description](https://github.com/pbosetti/SigGen). The name is the key the value is published under. |
+| `signals` | object | *(required)* | Map of signal name to [SigGen signal description](https://github.com/pbosetti/SigGen). The name is the key the value is published under. An entry may instead be an *array* of signal descriptions (a TOML `[[signals.signals.<name>]]` array of tables): each element is built as its own generator, and their values are packed into a JSON array, in declaration order, under that one key — e.g. a 3-element `position` publishes `{"position": [x, y, z]}`. Every element gets its own derived seed, exactly like a top-level entry. |
 | `sample_rate` | number (Hz) | `1000 / period` | Explicit sampling rate. Setting it also switches `track_period` off. |
 | `seed` | integer ≥ 0 | *(random)* | Base seed. The *n*-th signal gets `seed + n`, so each has its own random stream; a `seed` inside a signal description overrides it. |
 | `nest` | string | `""` | Key under which the value map is published. Empty means the values go at the top level of the frame. |
@@ -116,7 +133,8 @@ default):
   "n": 2,
   "sample_rate": 5.0,
   "temperature": 30.543,
-  "pressure": 3.497
+  "pressure": 3.497,
+  "position": [0.844, 0.535, 0.04]
 }
 ```
 
@@ -125,7 +143,7 @@ default):
 | `t` | Time of the sample, in seconds since the first one — or, under synchro generation, the wall-clock instant (Unix s) the addressed sample belongs to. |
 | `n` | Index of the sample — under synchro generation, the absolute index its wall-clock instant maps to, shared by every synchronized instance. |
 | `sample_rate` | The sampling frequency, in Hz, the sample was drawn at. It varies slightly while `track_period` follows the measured loop period; it is fixed when `sample_rate` is set explicitly or `epoch` enables synchro generation. |
-| *signal names* | One field per configured signal, or a single object when `nest` is set. A signal named `t`, `n` or `sample_rate` overrides the field above. |
+| *signal names* | One field per configured signal, or a single object when `nest` is set. An entry configured as an array of signals publishes a JSON array here, in declaration order, instead of a scalar. A signal named `t`, `n` or `sample_rate` overrides the field above. |
 
 The agent adds `agent_id`, `hostname`, `timestamp` and `timecode` on its own.
 
@@ -138,6 +156,7 @@ fixed 8 Hz and compares every sample with its analytic value, then checks the
 nested output mode, the rate derived from `period`, the reproducibility of
 seeded noise, that two independently started instances sharing an `epoch`
 agree on the same synchro-generated frame, that a non-addressable signal
-refuses to start under synchro generation, and that a broken configuration is
-reported as `critical`. It prints the last frame and exits non-zero if any
-check fails.
+refuses to start under synchro generation, that an array-valued signal entry
+publishes an ordered array with each element on its own random stream, and
+that a broken configuration is reported as `critical`. It prints the last
+frame and exits non-zero if any check fails.

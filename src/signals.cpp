@@ -121,12 +121,12 @@ public:
         // same index at the same wall-clock instant, however far apart each
         // of them started.
         const double now = SigGen::unix_now();
-        const uint64_t index = _generators.front().signal->index_at(now);
-        out["t"] = _generators.front().signal->time_at(index);
+        const uint64_t index = _generators.front().signals.front()->index_at(now);
+        out["t"] = _generators.front().signals.front()->time_at(index);
         out["n"] = index;
         out["sample_rate"] = _sample_rate;
         for (auto &generator : _generators)
-          values[generator.name] = generator.signal->at(index);
+          values[generator.name] = sample_generator(generator, index);
       } else {
         // One sample per call means the sampling frequency is the reciprocal
         // of the loop period; keep it aligned with the period actually
@@ -136,7 +136,7 @@ public:
         out["n"] = _index;
         out["sample_rate"] = _sample_rate;
         for (auto &generator : _generators)
-          values[generator.name] = generator.signal->next();
+          values[generator.name] = sample_generator(generator, 0);
         _elapsed += 1.0 / _sample_rate;
         _index += 1;
       }
@@ -211,9 +211,12 @@ public:
       return {{"ERROR", _setup_error}};
 
     ostringstream names;
-    for (size_t i = 0; i < _generators.size(); ++i)
-      names << (i ? ", " : "") << _generators[i].name << " ("
-            << _generators[i].signal->type() << ")";
+    for (size_t i = 0; i < _generators.size(); ++i) {
+      names << (i ? ", " : "") << _generators[i].name << " (";
+      for (size_t j = 0; j < _generators[i].signals.size(); ++j)
+        names << (j ? "+" : "") << _generators[i].signals[j]->type();
+      names << ")";
+    }
 
     return {
         {"signals", names.str()},
@@ -228,10 +231,29 @@ public:
 
 private:
   // Define the fields that are used to store internal resources
+  //
+  // Normally one signal per name, published as a scalar; a "signals" entry
+  // given as a JSON array builds one generator per element instead, and
+  // sample_generator() packs their values into a JSON array in that order --
+  // e.g. a 3-element "position" publishes {"position": [x, y, z]}.
   struct Generator {
     string name;
-    unique_ptr<SigGen::Signal> signal;
+    vector<unique_ptr<SigGen::Signal>> signals;
   };
+
+  /// One sample from every underlying generator behind `generator`, as a
+  /// scalar for an ordinary entry or a JSON array, in declaration order, for
+  /// one built from an array of signal descriptions.
+  json sample_generator(Generator &generator, uint64_t index) {
+    if (generator.signals.size() == 1) {
+      SigGen::Signal &signal = *generator.signals.front();
+      return _synchro ? signal.at(index) : signal.next();
+    }
+    json values = json::array();
+    for (auto &signal : generator.signals)
+      values.push_back(_synchro ? signal->at(index) : signal->next());
+    return values;
+  }
 
   /// The shared epoch for synchro generation, in seconds since the Unix
   /// epoch. Zero (the default) means every generator is addressed the usual
@@ -274,12 +296,49 @@ private:
     return 1000.0 / period_ms;
   }
 
+  /// Build one SigGen signal from an already-scoped descriptor: `base` plus
+  /// the descriptor under "signal", the section's sample rate and epoch, and
+  /// the next derived seed. `offset` is shared across every signal built for
+  /// the section, scalar or grouped, so each still gets its own stream.
+  unique_ptr<SigGen::Signal> build_component(const json &base,
+                                             const json &descriptor,
+                                             uint64_t &offset) {
+    if (!descriptor.is_object())
+      throw runtime_error("expected a signal object, got " +
+                          string(descriptor.type_name()));
+
+    json document = base;
+    document["signal"] = descriptor;
+    document["sample_rate"] = _sample_rate;
+    document["epoch"] = _epoch;
+    // Distinct streams: sharing one seed would make every signal's noise the
+    // same sequence. A per-signal "seed" overrides the derived one.
+    if (descriptor.contains("seed"))
+      document["seed"] = descriptor["seed"];
+    else if (_seeded)
+      document["seed"] = _seed + offset;
+    offset += 1;
+
+    auto signal = SigGen::from_json(document);
+    // Synchro generation addresses samples by index (see get_output()),
+    // which not every generator can do; refuse to start rather than
+    // silently falling back to an unsynchronized stream.
+    if (_synchro && !signal->is_addressable())
+      throw runtime_error("type '" + signal->type() +
+                          "' does not support synchro generation (not "
+                          "addressable); set 'epoch' to 0 to drop it");
+    return signal;
+  }
+
   /// Turn the "signals" map into generators, one per entry.
   ///
-  /// Each signal is built from a document made of the whole settings section
-  /// minus the reserved keys, with the signal itself under "signal": that is
-  /// what lets a description refer to a section-level constant as "$f0", the
-  /// way a stand-alone SigGen configuration file does.
+  /// An entry is either a single signal description (published as a scalar)
+  /// or a JSON array of them (published as a JSON array in that order, e.g.
+  /// a 3-element "position" for an [x, y, z] reading). Either way, each
+  /// underlying signal is built from a document made of the whole settings
+  /// section minus the reserved keys, with the signal itself under "signal":
+  /// that is what lets a description refer to a section-level constant as
+  /// "$f0", the way a stand-alone SigGen configuration file does.
   void build_generators() {
     _generators.clear();
 
@@ -309,30 +368,20 @@ private:
 
     uint64_t offset = 0;
     for (const auto &item : signals.items()) {
-      json document = base;
-      document["signal"] = item.value();
-      document["sample_rate"] = _sample_rate;
-      document["epoch"] = _epoch;
-      // Distinct streams: sharing one seed would make every signal's noise
-      // the same sequence. A per-signal "seed" overrides the derived one.
-      if (item.value().is_object() && item.value().contains("seed"))
-        document["seed"] = item.value()["seed"];
-      else if (_seeded)
-        document["seed"] = _seed + offset;
+      vector<unique_ptr<SigGen::Signal>> group;
       try {
-        auto signal = SigGen::from_json(document);
-        // Synchro generation addresses samples by index (see get_output()),
-        // which not every generator can do; refuse to start rather than
-        // silently falling back to an unsynchronized stream.
-        if (_synchro && !signal->is_addressable())
-          throw runtime_error("type '" + signal->type() +
-                              "' does not support synchro generation (not "
-                              "addressable); set 'epoch' to 0 to drop it");
-        _generators.push_back({item.key(), std::move(signal)});
+        if (item.value().is_array()) {
+          if (item.value().empty())
+            throw runtime_error("an array of signals must not be empty");
+          for (const auto &descriptor : item.value())
+            group.push_back(build_component(base, descriptor, offset));
+        } else {
+          group.push_back(build_component(base, item.value(), offset));
+        }
       } catch (const exception &e) {
         throw runtime_error("signal '" + item.key() + "': " + e.what());
       }
-      offset += 1;
+      _generators.push_back({item.key(), std::move(group)});
     }
   }
 
@@ -366,7 +415,8 @@ private:
       return;
     _sample_rate = fs;
     for (auto &generator : _generators)
-      generator.signal->set_sample_rate(fs);
+      for (auto &signal : generator.signals)
+        signal->set_sample_rate(fs);
   }
 
   vector<Generator> _generators;
@@ -563,6 +613,70 @@ void test_synchro_requires_addressable() {
         "the error explains that the signal cannot be addressed");
 }
 
+/// A "signals" entry given as a JSON array builds one generator per element
+/// and packs their values into a JSON array, in declaration order, under
+/// that one key -- e.g. for a position reading published as [x, y, z].
+void test_signal_group() {
+  SignalsPlugin plugin;
+  json params = base_params();
+  params["signals"]["position"] = json::array(
+      {{{"type", "sine"},
+        {"frequency", "$f0"},
+        {"amplitude", 2.0},
+        {"offset", 1.0},
+        {"noiseless", true}},
+       {{"type", "sawtooth"},
+        {"frequency", "$f0 / 2"},
+        {"amplitude", 1.0},
+        {"noiseless", true}}});
+  plugin.set_params(params);
+
+  json out;
+  for (uint64_t n = 0; n < 4; ++n) {
+    check(plugin.get_output(out) == return_type::success,
+          "a grouped run succeeds at sample " + std::to_string(n));
+    check(out["position"].is_array() && out["position"].size() == 2,
+          "the group is published as an array, in declaration order");
+    check_close(out["position"][0].get<double>(), expected_sine(n),
+                "first component of the group at sample " + std::to_string(n));
+    check_close(out["position"][1].get<double>(), expected_ramp(n),
+                "second component of the group at sample " + std::to_string(n));
+  }
+}
+
+/// Every element of a group is built the same way a scalar entry is, so it
+/// gets its own derived seed and hence its own random stream.
+void test_signal_group_independent_streams() {
+  json params = base_params();
+  params["seed"] = 20260910u;
+  params["signals"]["pair"] = json::array(
+      {{{"type", "white_noise"}, {"sigma", 1.0}},
+       {{"type", "white_noise"}, {"sigma", 1.0}}});
+
+  SignalsPlugin plugin;
+  plugin.set_params(params);
+
+  json out;
+  plugin.get_output(out);
+  check(out["pair"][0] != out["pair"][1],
+        "each element of a group gets its own random stream");
+}
+
+/// An empty array names a real mistake -- a group with nothing in it -- and
+/// is refused rather than silently publishing an empty array forever.
+void test_signal_group_empty_is_critical() {
+  SignalsPlugin plugin;
+  json params = base_params();
+  params["signals"]["nothing"] = json::array();
+  plugin.set_params(params);
+
+  json out;
+  check(plugin.get_output(out) == return_type::critical,
+        "an empty group is critical");
+  check(plugin.error().find("nothing") != string::npos,
+        "the error names the offending signal");
+}
+
 void test_configuration_errors() {
   json out;
 
@@ -601,6 +715,9 @@ int main(int argc, char const *argv[]) {
   test_seeding();
   test_synchro_generation();
   test_synchro_requires_addressable();
+  test_signal_group();
+  test_signal_group_independent_streams();
+  test_signal_group_empty_is_critical();
   test_configuration_errors();
 
   if (Failures > 0) {
