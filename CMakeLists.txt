@@ -11,10 +11,14 @@
 # Creation date: 2026-09-09T10:44:14.721+0200
 # NOTICE: MADS Version 2.4.3
 cmake_minimum_required(VERSION 3.28)
-project(siggen VERSION 2.4.3 LANGUAGES CXX)
-if(CMAKE_BUILD_TYPE STREQUAL "")
-  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build." FORCE)
+# Release by default. This must come before project(): there, single-config
+# generators with MSVC already initialize CMAKE_BUILD_TYPE to Debug, and a
+# Debug plugin cannot share std::string/json objects with a Release MADS
+# (different C runtimes).
+if(NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build.")
 endif()
+project(siggen VERSION 2.4.3 LANGUAGES CXX)
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   execute_process(
     COMMAND mads -p
@@ -80,7 +84,7 @@ FetchContent_MakeAvailable(pugg json SigGen)
 
 FetchContent_Populate(plugin
   GIT_REPOSITORY https://github.com/pbosetti/mads_plugin.git
-  GIT_TAG        v2.4-P8
+  GIT_TAG        v2.6-P9
   GIT_SHALLOW    TRUE
   SUBBUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/plugin-subbuild
   SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps/plugin-src

@@ -15,7 +15,7 @@ signals is the reciprocal of the loop period: at the default period of 100 ms a
 signal declared at 0.5 Hz completes one cycle every two seconds of wall-clock
 time.
 
-*Required MADS version: 2.4.0.*
+> This plugin has been updated for MADS v3.
 
 
 ## Supported platforms
