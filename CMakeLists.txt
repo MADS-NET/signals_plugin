@@ -18,7 +18,7 @@ cmake_minimum_required(VERSION 3.28)
 if(NOT DEFINED CMAKE_BUILD_TYPE AND NOT DEFINED CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build.")
 endif()
-project(siggen VERSION 2.4.3 LANGUAGES CXX)
+project(siggen VERSION 3.0.0 LANGUAGES CXX)
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
   execute_process(
     COMMAND mads -p

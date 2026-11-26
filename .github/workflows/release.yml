@@ -56,7 +56,7 @@ jobs:
 
           - name: macOS universal
             id: macos-universal
-            runner: macos-14
+            runner: macos-latest
             generator: Ninja
             platform: ""
             osx_architectures: x86_64;arm64
